@@ -7,5 +7,4 @@ if not "%HEIGE_EXIT%"=="0" (
   if /I not "%HEIGE_NO_PAUSE%"=="1" pause
   exit /b %HEIGE_EXIT%
 )
-if /I not "%HEIGE_NO_PAUSE%"=="1" pause
 exit /b 0

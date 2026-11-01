@@ -52,9 +52,9 @@ test("uses the approved package identity without ASAR runtime modules", async ()
   ]);
 
   assert.equal(packageJson.name, "workbuddy-skin-studio");
-  assert.equal(packageJson.version, "0.1.0");
-  assert.equal(packageLock.version, "0.1.0");
-  assert.equal(packageLock.packages?.[""]?.version, "0.1.0");
+  assert.equal(packageJson.version, "0.1.1");
+  assert.equal(packageLock.version, "0.1.1");
+  assert.equal(packageLock.packages?.[""]?.version, "0.1.1");
   assert.match(readme, /非官方衍生项目/);
   assert.match(readme, /HeiGeAi\/heige-codex-skin-studio/);
   assert.equal(packageJson.type, "module");

@@ -54,6 +54,8 @@ test("Windows WorkBuddy session launch is identity-bound and its task fallback i
     source("scripts/windows/workbuddy-apply.ps1"),
     source("scripts/windows/workbuddy-restore.ps1"),
   ]);
+  assert.match(session, /CreateNoWindow\s*=\s*0x08000000/);
+  assert.match(session, /CreateNoWindow\s*\|\s*CreateNewProcessGroup/);
   assert.match(session, /CreateBreakawayFromJob/);
   assert.match(session, /New-ScheduledTaskPrincipal[\s\S]*-LogonType Interactive[\s\S]*-RunLevel Limited/);
   assert.match(session, /WorkBuddy Skin Studio Session/);
@@ -64,4 +66,11 @@ test("Windows WorkBuddy session launch is identity-bound and its task fallback i
   assert.match(apply, /WORKBUDDY_REMOTE_DEBUGGING_PORT/);
   assert.match(apply, /Start-HeiGeWorkBuddySession/);
   assert.match(restore, /Remove-HeiGeWorkBuddySessionTask/);
+});
+
+test("successful WorkBuddy apply exits its batch console without waiting for input", async () => {
+  const applyBatch = await source("scripts/windows/workbuddy-apply.bat");
+  const pauses = applyBatch.match(/\bpause\b/g) ?? [];
+  assert.equal(pauses.length, 1);
+  assert.match(applyBatch, /if not "%HEIGE_EXIT%"=="0"[\s\S]*pause/);
 });

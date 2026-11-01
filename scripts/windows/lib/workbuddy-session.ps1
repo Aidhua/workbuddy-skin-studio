@@ -108,6 +108,7 @@ namespace HeiGe {
     }
 
     public static class WorkBuddySessionProcess {
+        const uint CreateNoWindow = 0x08000000;
         const uint CreateNewProcessGroup = 0x00000200;
         const uint CreateBreakawayFromJob = 0x01000000;
 
@@ -131,7 +132,10 @@ namespace HeiGe {
             var si = new WorkBuddyStartupInfo();
             si.cb = Marshal.SizeOf(typeof(WorkBuddyStartupInfo));
             WorkBuddyProcessInfo pi;
-            uint flags = CreateNewProcessGroup;
+            // WorkBuddy is launched from a double-clicked batch file.  Without
+            // CREATE_NO_WINDOW it stays attached to that batch file's console,
+            // so closing the console also terminates WorkBuddy and the skin.
+            uint flags = CreateNoWindow | CreateNewProcessGroup;
             if (breakaway) flags |= CreateBreakawayFromJob;
             var commandLine = new StringBuilder("\"" + applicationName + "\"");
             var workingDirectory = System.IO.Path.GetDirectoryName(applicationName);
