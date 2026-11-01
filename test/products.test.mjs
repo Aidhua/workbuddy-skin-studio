@@ -1,0 +1,541 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  DEFAULT_PRODUCT_ID,
+  PRODUCT_IDS,
+  isProductId,
+  productAppCandidates,
+  productBundledNodeCandidates,
+  productCdpLaunchSpec,
+  productExecutablePath,
+  productForAppPath,
+  productProfile,
+  profileForAppPath,
+} from "../src/products.mjs";
+import { resolveStudioPaths } from "../src/constants.mjs";
+import { buildWorkBuddySkinCss } from "../src/skin-css-workbuddy.mjs";
+import { classifyWorkBuddyTarget } from "../src/target-classifier.mjs";
+
+const HERO = "data:image/png;base64,aGVybw==";
+const POLAROID = "data:image/png;base64,cG9sYXJvaWQ=";
+
+const THEME = {
+  id: "naruto-sasuke",
+  appearance: "dark",
+  colors: { accent: "#8E1B2E", secondary: "#3B1F4B", surface: "#171019", text: "#FFD9D2" },
+};
+
+test("默认产品是 Codex，没显式传产品的老路径行为不变", () => {
+  assert.equal(DEFAULT_PRODUCT_ID, "codex");
+  assert.deepEqual([...PRODUCT_IDS], ["codex", "workbuddy"]);
+  assert.equal(productProfile().id, "codex");
+  assert.equal(productProfile(null).id, "codex");
+  assert.equal(productProfile(undefined).id, "codex");
+  assert.equal(productProfile({ id: "workbuddy" }).id, "workbuddy");
+  assert.equal(isProductId("workbuddy"), true);
+  assert.equal(isProductId("cursor"), false);
+  assert.throws(() => productProfile("cursor"), /未知产品：cursor/);
+});
+
+test("Codex 档案的对外事实一字不改", () => {
+  const codex = productProfile("codex");
+  assert.equal(codex.label, "Codex");
+  assert.equal(codex.defaultCdpPort, 9341);
+  assert.equal(codex.rendererOrigin, "app://-");
+  assert.equal(codex.expectedBundleId, "com.openai.codex");
+  assert.equal(codex.expectedTeamId, "2DC432GLL2");
+  assert.equal(codex.macExecutableName, "ChatGPT");
+  assert.equal(codex.installHomeDirName, ".codex");
+  assert.equal(codex.stateDirName, "HeiGeCodexSkinStudio");
+  assert.equal(codex.supportsControlChannel, true);
+  assert.equal(codex.cdpPortVisibleInArgs, true);
+  assert.equal(codex.windowsVerified, true);
+});
+
+test("WorkBuddy 档案记的是真机核过的身份，端口跟 Codex 错开", () => {
+  const wb = productProfile("workbuddy");
+  assert.equal(wb.label, "WorkBuddy");
+  assert.equal(wb.defaultCdpPort, 9342);
+  assert.notEqual(wb.defaultCdpPort, productProfile("codex").defaultCdpPort);
+  assert.equal(wb.expectedBundleId, "com.workbuddy.workbuddy");
+  assert.equal(wb.expectedTeamId, "FN2V63AD2J");
+  // WorkBuddy 是标准 Electron 打包，主程序名不是应用名
+  assert.equal(wb.macExecutableName, "Electron");
+  assert.equal(wb.rendererOrigin, "file://");
+  assert.equal(wb.windowsVerified, true);
+});
+
+test("WorkBuddy 不开控制通道：file:// 的 Origin 是 null，放行等于掏空 CSRF 校验", () => {
+  const wb = productProfile("workbuddy");
+  assert.equal(wb.supportsControlChannel, false);
+  assert.equal(wb.supportsWindowsRendererControlFallback, true);
+  // 不支持控制通道就没有常驻，因此档案里不该出现 LaunchAgent 标签字段
+  assert.equal("launchAgentSuffix" in productProfile("workbuddy"), false);
+  assert.equal("launchAgentSuffix" in productProfile("codex"), false);
+});
+
+test("状态根按产品隔离，两个产品的锁和 state.json 不会互相抢", () => {
+  const codex = resolveStudioPaths({ home: "/Users/example", platform: "darwin", product: "codex" });
+  const wb = resolveStudioPaths({ home: "/Users/example", platform: "darwin", product: "workbuddy" });
+  // Codex 侧保持历史路径，老用户升级不迁移
+  assert.equal(codex.stateRoot, "/Users/example/Library/Application Support/HeiGeCodexSkinStudio");
+  assert.equal(codex.installRoot, "/Users/example/.codex/heige-codex-skin-studio");
+  assert.equal(
+    wb.stateRoot,
+    "/Users/example/Library/Application Support/WorkBuddySkinStudio",
+  );
+  assert.equal(wb.installRoot, "/Users/example/.workbuddy/heige-codex-skin-studio");
+  for (const key of ["stateRoot", "statePath", "lockPath", "sessionPath", "userThemesRoot"]) {
+    assert.notEqual(codex[key], wb[key], `${key} 必须按产品分开`);
+  }
+  // 不传 product 必须和显式传 codex 完全一致
+  assert.deepEqual(resolveStudioPaths({ home: "/Users/example", platform: "darwin" }), codex);
+
+  const wbWindows = resolveStudioPaths({
+    home: "C:\\Users\\example",
+    platform: "win32",
+    env: { APPDATA: "C:\\Users\\example\\AppData\\Roaming" },
+    product: "workbuddy",
+  });
+  assert.equal(
+    wbWindows.stateRoot,
+    "C:\\Users\\example\\.workbuddy\\WorkBuddySkinStudio",
+  );
+});
+
+test("从应用路径反推产品，认不出返回 null 交给上层落到 Codex", () => {
+  assert.equal(productForAppPath("/Applications/ChatGPT.app", { platform: "darwin" }), "codex");
+  assert.equal(productForAppPath("/Applications/WorkBuddy.app", { platform: "darwin" }), "workbuddy");
+  assert.equal(productForAppPath("/Users/x/Applications/WorkBuddy.app/", { platform: "darwin" }), "workbuddy");
+  assert.equal(productForAppPath("/Applications/Cursor.app", { platform: "darwin" }), null);
+  assert.equal(productForAppPath(""), null);
+  assert.equal(productForAppPath(undefined), null);
+  assert.equal(
+    productForAppPath("C:\\Program Files\\WorkBuddy\\WorkBuddy.exe", { platform: "win32" }),
+    "workbuddy",
+  );
+  // 认不出来时 profileForAppPath 落到 Codex，后续可执行文件校验会明确报错
+  assert.equal(profileForAppPath("/Applications/Cursor.app", { platform: "darwin" }).id, "codex");
+  assert.equal(profileForAppPath("/Applications/WorkBuddy.app", { platform: "darwin" }).id, "workbuddy");
+});
+
+test("可执行文件路径跟着产品走，别拿 ChatGPT 去校 WorkBuddy", () => {
+  assert.equal(
+    productExecutablePath("codex", "/Applications/ChatGPT.app", { platform: "darwin" }),
+    "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+  );
+  assert.equal(
+    productExecutablePath("workbuddy", "/Applications/WorkBuddy.app", { platform: "darwin" }),
+    "/Applications/WorkBuddy.app/Contents/MacOS/Electron",
+  );
+});
+
+test("探测位点覆盖 /Applications 和 ~/Applications 两处", () => {
+  assert.deepEqual(
+    productAppCandidates("workbuddy", { platform: "darwin", home: "/Users/example" }),
+    ["/Applications/WorkBuddy.app", "/Users/example/Applications/WorkBuddy.app"],
+  );
+  assert.deepEqual(
+    productAppCandidates("codex", { platform: "darwin", home: "/Users/example" }),
+    ["/Applications/ChatGPT.app", "/Users/example/Applications/ChatGPT.app"],
+  );
+});
+
+test("WorkBuddy 没有可执行的内置 Node，候选列表必须是空的", () => {
+  assert.deepEqual(
+    productBundledNodeCandidates("workbuddy", "/Applications/WorkBuddy.app", { platform: "darwin" }),
+    [],
+  );
+  assert.deepEqual(
+    productBundledNodeCandidates("codex", "/Applications/ChatGPT.app", { platform: "darwin" }),
+    [
+      "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node",
+      "/Applications/ChatGPT.app/Contents/Resources/cua_node/node",
+    ],
+  );
+});
+
+test("开调试端口的方式跟着产品走：Codex 走参数，WorkBuddy 走环境变量", () => {
+  assert.deepEqual(productCdpLaunchSpec("codex", 9341), {
+    args: ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9341"],
+    env: {},
+  });
+  assert.deepEqual(productCdpLaunchSpec("workbuddy", 9342), {
+    args: [],
+    env: { WORKBUDDY_REMOTE_DEBUGGING_PORT: "9342" },
+  });
+  // 端口在 WorkBuddy 的 ps 命令行里看不见，身份判定不能按参数筛
+  assert.equal(productProfile("workbuddy").cdpPortVisibleInArgs, false);
+  for (const bad of [80, 70000, 9341.5, "9341", null]) {
+    assert.throws(() => productCdpLaunchSpec("workbuddy", bad), TypeError);
+  }
+});
+
+test("WorkBuddy 皮肤 CSS 同时写 :root 和 body，只写 :root 会被宿主主题盖掉", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+  // WorkBuddy 的主题文件用 `:root, body[data-vscode-theme-name="IDE Light"]`
+  // 把整套令牌在 body 上又声明了一遍，只写 :root 的话 body 以下读到的还是原生浅色
+  assert.match(css, /^:root,\nbody \{/m);
+  assert.match(css, /HEIGE_WORKBUDDY_SKIN:naruto-sasuke/);
+  assert.match(css, /color-scheme: dark !important/);
+});
+
+test("WorkBuddy 皮肤覆盖三层令牌，结构色改、品牌色和状态色不动", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+  for (const token of [
+    "--cb-text-primary",
+    "--cb-vscode-editor-background",
+    // --wb-* 是新版结构层，写成 var(--wb-x, var(--cb-x, …)) 的回退链，
+    // 只改 --cb-* 压不住它。--wb-sidebar-bg 是折叠区标题那条高特异性 !important 规则的取值来源
+    "--wb-sidebar-bg",
+    "--wb-bg-card",
+    "--wb-text-primary",
+    "--wb-border-default",
+  ]) {
+    assert.match(css, new RegExp(`${token}:`), `缺少令牌覆盖：${token}`);
+  }
+  for (const untouched of [
+    "--wb-bg-connector-github",
+    "--wb-text-enterprise",
+    "--wb-bg-error-soft",
+    "--wb-bg-success-soft",
+    // 对比双方不都归我们管的，改了会做出浅底浅字，必须原样放过
+    "--wb-bg-tooltip",
+    "--wb-bg-overlay",
+    "--wb-text-white",
+  ]) {
+    assert.doesNotMatch(css, new RegExp(`${untouched}:`), `不该动的令牌被改了：${untouched}`);
+  }
+});
+
+test("WorkBuddy 皮肤只挂稳定选择器，一个构建哈希类名都不许出现", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+  // _gridViewItem_1ens7_14 / _chipLabel_12mii_44 这类 CSS Module 哈希每次构建都会变
+  const hashed = css.match(/\._[A-Za-z][A-Za-z0-9]*_[a-z0-9]{4,}(_\d+)?\b/g) ?? [];
+  assert.deepEqual(hashed, []);
+  // 换成宿主写死颜色时用的稳定挂钩
+  for (const hook of [
+    "[data-slate-editor=\"true\"]",
+    "[data-cb-chat-input-toolbar-selector]",
+    ".conversation-list-tab-button",
+    ".quick-actions__item",
+    "#root [data-view-id]",
+  ]) {
+    assert.ok(css.includes(hook), `缺少稳定挂钩：${hook}`);
+  }
+});
+
+test("WorkBuddy 全窗口背景挂在 body，标题栏不能因 root 的 30px 避让而露出黑底", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+  const windowBackground = css.slice(css.indexOf("/* WorkBuddy 5.9.3 的 #root"));
+  assert.match(windowBackground, /body \{[\s\S]*?background:[\s\S]*?linear-gradient[\s\S]*?url\(/);
+  assert.match(css, /#root \{[^}]*background:\s*transparent !important/);
+  assert.ok(windowBackground.indexOf("url(") < windowBackground.indexOf("#root {"));
+});
+
+test("WorkBuddy 侧栏直透模式只挂 WorkBuddy 稳定语义类", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+  assert.match(css, /linear-gradient\(90deg, color-mix\(in srgb, var\(--heige-surface\) 58%, transparent\)/);
+  assert.match(css, /\.conversation-sidebar,[\s\S]*background: transparent !important/);
+  assert.match(css, /\.conversation-sidebar,[\s\S]*backdrop-filter: none !important/);
+  assert.match(css, /@supports not \(\(backdrop-filter: blur\(1px\)\)/);
+});
+
+test("AI 回复垫了蒙版就必须一起接管正文和底部文字，只垫底会做出黑字压深色蒙版", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+  // WorkBuddy 会把一条回复拆成多个同 request-id 的消息壳，未使用的分片只有一个空子节点。
+  // 蒙版如果直接打在外壳上，padding 会把每个空分片撑成一条横向白条。
+  assert.doesNotMatch(
+    css,
+    /:root\[data-heige-readability="on"\] \.cb-assistant-message \{[^}]*background:/,
+    "回复外壳不能直接承载蒙版，否则空分片会被撑成白条",
+  );
+  // 蒙版本身挂阅读增强开关，并且只落在真正非空的直接内容节点上。
+  assert.match(
+    css,
+    /:root\[data-heige-readability="on"\] \.cb-assistant-message > :not\(:empty\) \{[^}]*background:[^}]*padding:/,
+    "回复蒙版必须只命中非空内容节点并挂在阅读增强开关下",
+  );
+  // 正文的 rgb(0,0,0) 和底部那排图标、消耗计数、时间的 rgba(0,0,0,.7) 都写死在各自节点上，
+  // 不继承外层容器。漏掉任何一条，深色主题下就是黑字压深色蒙版，比不垫更糊
+  for (const hook of [
+    ".cb-assistant-message .cb-markdown",
+    ".cb-assistant-message .cb-credit-usage-text",
+    ".cb-assistant-message .cb-message-time-tip",
+    ".cb-assistant-message button",
+    // 发言人名字在蒙版外面，任何时候都直接压在背景图上
+    ".avatar-container .name",
+  ]) {
+    assert.ok(css.includes(hook), `缺少稳定挂钩：${hook}`);
+  }
+  // 这几条颜色接管不挂开关：颜色写死是 WorkBuddy 自己的毛病，关掉蒙版一样要治
+  assert.match(css, /^\.cb-assistant-message \.cb-markdown,$/m, "正文颜色接管不该挂在开关下");
+  assert.match(css, /\.avatar-container \.name \{[^}]*text-shadow:/, "名字没有底可垫，必须留光晕");
+  for (const [label, pattern] of [
+    ["正文", /^\.cb-assistant-message \.cb-markdown,[\s\S]*?\}/m],
+    ["名字", /^\.avatar-container \.name \{[\s\S]*?\}/m],
+  ]) {
+    const rule = css.match(pattern);
+    assert.ok(rule, `找不到${label}的颜色接管规则`);
+    assert.ok(rule[0].includes("var(--heige-text)"), `${label}必须取主题色而不是写死颜色`);
+  }
+});
+
+test("WorkBuddy 5.5 对话画布必须绕过宿主新增的纯白 conversation-shell", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+
+  assert.match(
+    css,
+    /\.conversation-shell \{[^}]*background:\s*transparent\s*!important;/,
+    "5.5 的 conversation-shell 会写死纯白背景，必须显式恢复主题图",
+  );
+});
+
+test("WorkBuddy 5.5.3 首页路由不能用纯白背景遮住已注入的主题图", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+
+  assert.match(
+    css,
+    /\.wb-home-route \{[^}]*background:\s*transparent\s*!important;/,
+    "5.5.3 的 wb-home-route 覆盖整块首页，必须显式放行主题图",
+  );
+});
+
+test("WorkBuddy 5.9.3 全窗口网格不能用两层底色遮住主题图", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+  assert.match(css, /\.teams-grid-scroll-content,/);
+  assert.match(css, /\.teams-grid-scroll-content > :first-child > :first-child\s*\{[\s\S]*?background: transparent !important;/);
+  assert.doesNotMatch(css, /_gridView_[a-z0-9]+/i);
+});
+
+test("WorkBuddy 皮肤不再生成会遮挡右下角功能键的拍立得挂件", () => {
+  const css = buildWorkBuddySkinCss({
+    theme: THEME,
+    heroDataUrl: HERO,
+    polaroidDataUrl: POLAROID,
+  });
+
+  assert.doesNotMatch(css, /body::after\s*\{/);
+  assert.ok(!css.includes(POLAROID), "WorkBuddy CSS 不应继续携带拍立得图片数据");
+});
+
+test("WorkBuddy 5.5 的 cr 令牌必须桥接到主题色且不移除旧版 cb 兼容", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+
+  assert.match(css, /\.cr-theme \{[\s\S]*?--cr-text-primary:\s*var\(--heige-text\)\s*!important;/);
+  assert.match(css, /\.cr-theme \{[\s\S]*?--cr-user-bubble-bg:[^;]+!important;/);
+  assert.match(css, /\.cr-theme \{[\s\S]*?--cr-border-default:[^;]+!important;/);
+  assert.match(css, /\.cr-theme \{[\s\S]*?--cr-popover-bg:\s*var\(--heige-solid\)\s*!important;/);
+  assert.ok(css.includes(".cb-assistant-message .cb-markdown"), "5.3 的 cb 选择器仍要保留");
+});
+
+test("WorkBuddy 5.5 助手回复只给非空 cr 内容垫阅读蒙版", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+
+  assert.doesNotMatch(
+    css,
+    /:root\[data-heige-readability="on"\] \.cr-agent \{[^}]*background:/,
+    "不能给整条 cr 消息外壳加背景，否则虚拟列表空节点会变成色块",
+  );
+  assert.match(
+    css,
+    /:root\[data-heige-readability="on"\] \.cr-agent__body:has\(> \.cr-agent__content:not\(:empty\)\) \{[^}]*background:[^}]*padding:/,
+    "5.5 的阅读蒙版必须落在含真实内容的 cr-agent__body 上",
+  );
+  assert.match(css, /\.cr-agent__name \{[^}]*text-shadow:/, "回复名称仍直接压在背景图上，需要可读性光晕");
+});
+
+test("WorkBuddy 5.5 输入框继续使用半透明主题表面", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+
+  assert.match(
+    css,
+    /\.cr-input-box \{[\s\S]*?--cr-bg-elevated:\s*color-mix\(in srgb, var\(--heige-surface\) 86%, transparent\)\s*!important;/,
+    "5.5 输入框不能退回纯白底",
+  );
+});
+
+test("浮层一律实底：半透明只给对话区，菜单和弹层透光就会跟底下正文叠字", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+
+  // 实底令牌本身不能掺 transparent，掺了等于没治
+  const solid = css.match(/^\s*--heige-solid:.*$/m);
+  assert.ok(solid, "缺少浮层专用的实底令牌 --heige-solid");
+  assert.match(solid[0], /var\(--heige-surface\)/, "实底令牌必须直接取主题底色");
+  assert.doesNotMatch(solid[0], /color-mix|transparent/, "实底令牌不许掺透明");
+
+  // 读令牌的那批浮层：模态、弹出层、下拉、悬浮卡全要指向实底，不许再落回半透明的 veil
+  for (const token of [
+    "--cb-vscode-dropdown-background",
+    "--cb-bg-elevated",
+    "--cb-bg-overlay",
+    "--cb-hover-card-bg-color",
+    "--cb-dialog-bg",
+    "--cb-popover-bg",
+    "--wb-bg-modal",
+    "--wb-bg-popover",
+    "--wb-bg-elevated",
+  ]) {
+    const line = css.match(new RegExp(`^\\s*${token}:.*$`, "m"));
+    assert.ok(line, `缺少浮层令牌 ${token}`);
+    assert.match(line[0], /var\(--heige-solid\)/, `${token} 必须实底`);
+  }
+
+  // 什么令牌都不读的那批浮层：只能按稳定类名钉实底
+  for (const hook of [
+    ".settings-modal",
+    ".user-menu-popover",
+    ".wb-popover",
+    ".wb-dropdown",
+    ".wb-modal",
+    ".ec-modal-card",
+    ".feedback-modal",
+    ".published-apps-list__progress-dialog",
+    ".custom-dropdown__menu",
+    ".tip-sound-select__menu",
+    ".wb-storage-confirm-popover",
+    ".models-settings-panel__delete-dialog",
+    ".collab-modal__container",
+    ".mcp-modal",
+    ".connector-center__popup-menu",
+    ".agent-mail-detail-dialog",
+    ".tdoc-import-menu",
+    ".create-file-popover",
+    ".netdrive-selector-modal",
+    ".action-popover__menu",
+    ".collaborator-avatar-stack-popover",
+    ".compact-nav-dropdown",
+    ".expert-prompt-modal",
+    ".mcp-apps-panel__dropdown",
+    ".dc-drawer",
+    ".dc-launch-dialog",
+    ".dc-confirm-dialog",
+    ".skills-installed-dropdown",
+    ".skillhub-sort-dropdown-menu",
+    ".skill-detail-dropdown",
+    ".skills-add-dropdown",
+    ".skill-batch-update-modal",
+    ".ima-file-selector__dialog",
+    ".lexiang-picker-dialog",
+    ".search-result-modal",
+    ".doc-selector-modal",
+    ".wb-cascader-popover",
+    ".network-check-modal",
+    ".connector-qr-modal",
+    ".connector-token-config-modal",
+    ".cfp-context-menu",
+    ".cfp-blank-context-menu",
+    ".cfp-preview-modal",
+    ".cfp-preview-modal__dropdown",
+    ".cfp-card-dropdown",
+    ".cfp-type-dropdown__menu",
+    ".cfp-upload-dropdown__menu",
+    ".cfp-version-modal",
+    ".cfp-folder-modal",
+    ".upload-modal",
+    ".upload-modal__context-menu",
+    ".upload-modal__folder-dialog",
+    ".preview-modal",
+    ".folder-picker-modal",
+    ".new-folder-modal",
+    ".project-detail-view__source-menu",
+    ".project-instruction-drawer",
+    ".conversation-search-modal",
+    ".conversation-context-menu",
+  ]) {
+    assert.ok(css.includes(`${hook},`) || css.includes(`${hook} {`), `浮层名单缺少 ${hook}`);
+  }
+
+  assert.match(
+    css,
+    /body\.agent-ui-theme \.conversation-archive-dialog > \* \{[^}]*background: var\(--heige-solid\) !important;/,
+    "归档弹窗必须用高于宿主规则的稳定选择器钉实底",
+  );
+
+  // BEM 子面板兜底：连字符和双下划线两种写法都得在，只写一种会漏掉添加模型框
+  for (const suffix of ["-modal-overlay", "__modal-overlay", "-editor-overlay", "__editor-overlay", "__overlay"]) {
+    assert.ok(css.includes(`[class$="${suffix}"] > *`), `兜底选择器缺少 ${suffix}`);
+    assert.ok(css.includes(`[class*="${suffix} "] > *`), `多 class 兜底选择器缺少 ${suffix}`);
+  }
+
+  // 遮罩自己必须留半透明黑纱，被兜底规则连坐会让整个界面全黑
+  assert.doesNotMatch(
+    css,
+    /^\[class\$="[^"]*overlay"\] \{/m,
+    "遮罩本体不许被垫实底",
+  );
+
+  // 强调色按钮的字色不能跟着编辑区底色一起透明，否则实心按钮上一个字都看不见
+  const primary = css.match(/^\.wb-button--primary,[\s\S]*?\}/m);
+  assert.ok(primary, "缺少强调色按钮的字色接管");
+  assert.match(primary[0], /var\(--heige-on-accent\)/, "强调色上的字必须走 --heige-on-accent");
+});
+
+test("WorkBuddy 的 CSS Modules 通用确认框一律覆盖宿主透明主画布背景", () => {
+  const css = buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO });
+
+  // WorkBuddy 5.3.14 的桥接样式会用 [class*=\"dialogContainer\"] 和 !important
+  // 把所有确认框重新绑到透明的 --wb-bg-primary。选择器必须直接对齐这个稳定语义
+  // 片段，并提高一级特异性，不能依赖每次构建都会变化的哈希后缀。
+  assert.match(
+    css,
+    /body\.agent-ui-theme \[class\*=\"dialogContainer\"\] \{[^}]*background: var\(--heige-solid\) !important;[^}]*backdrop-filter: none !important;/,
+    "通用 dialogContainer 必须压过宿主的透明 !important 规则",
+  );
+
+  assert.doesNotMatch(
+    css,
+    /body\.agent-ui-theme \[class\*=\"dialogOverlay\"\] \{/,
+    "只允许给确认框卡片垫实底，外层 60% 黑色遮罩必须保留",
+  );
+});
+
+test("WorkBuddy 主窗口识别放行 5.5.2 启动参数和 hash 路由，但仍按解码后的 pathname 认身份", () => {
+  const main = "file:///Applications/WorkBuddy.app/Contents/Resources/app.asar/renderer/index.html";
+  const windowsMain = "file:///E:/AI/WorkBuddy/resources/app.asar/renderer/index.html";
+  // 打开设置弹层就会把地址变成 index.html#，连 # 都拒会让皮肤在正常使用中途认不出主窗口
+  const current = `${main}?locale=zh-CN&accountSnapshot=%257B%2522version%2522%253A1%257D`;
+  for (const url of [
+    main,
+    `${main}#`,
+    `${main}#/settings/models`,
+    current,
+    `${current}#/settings/models`,
+    `${windowsMain}?locale=zh-CN&wbSeedToken=test`,
+  ]) {
+    assert.equal(classifyWorkBuddyTarget({ type: "page", url }), "main", `应认出：${url}`);
+  }
+  // 放行 fragment 不等于放行伪造：身份只看 pathname，fragment 影响不到它
+  for (const url of [
+    `file:///tmp/evil.html#${main.slice("file://".length)}`,
+    `file:///tmp/evil.html#/WorkBuddy.app/Contents/Resources/app.asar/renderer/index.html`,
+    "file:///Applications/WorkBuddy.app/Contents/Resources/app.asar/renderer/%2e%2e/index.html",
+    "file:///Applications/Evil.app/Contents/Resources/app.asar/renderer/index.html",
+    "file:///E:/AI/Evil/resources/app.asar/renderer/index.html",
+  ]) {
+    assert.equal(classifyWorkBuddyTarget({ type: "page", url }), "unknown", `应挡掉：${url}`);
+  }
+});
+
+test("WorkBuddy 皮肤拒绝非本地图片，防止皮肤把外链塞进宿主页面", () => {
+  assert.throws(
+    () => buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: "https://example.com/a.png" }),
+    /hero 必须是本地/,
+  );
+  assert.throws(
+    () => buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO, logoDataUrl: "javascript:0" }),
+    /logo 必须是本地/,
+  );
+  assert.throws(
+    () => buildWorkBuddySkinCss({ theme: THEME, heroDataUrl: HERO, polaroidDataUrl: "/tmp/a.png" }),
+    /polaroid 必须是本地/,
+  );
+  assert.throws(
+    () => buildWorkBuddySkinCss({
+      theme: { ...THEME, colors: { ...THEME.colors, accent: "red; }" } },
+      heroDataUrl: HERO,
+    }),
+    /无效主题颜色/,
+  );
+});

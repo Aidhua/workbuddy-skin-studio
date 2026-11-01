@@ -1,0 +1,31 @@
+{
+  "name": "workbuddy-skin-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows WorkBuddy skin adaptation based on HeiGe Codex Skin Studio",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "workbuddy-skin": "src/cli.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/cdp-client.test.mjs test/controller.test.mjs test/injector.test.mjs test/process-identity.test.mjs test/product-identity.test.mjs test/products.test.mjs test/resource-limits.test.mjs test/skin-css.test.mjs test/skin-menu.test.mjs test/target-classifier.test.mjs test/update-check.test.mjs test/windows-powershell-security-contract.test.mjs test/windows-runtime.test.mjs && node --test --test-name-pattern=\"WorkBuddy|Windows\" test/cli.test.mjs",
+    "test:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File test/windows/run-tests.ps1 -Suite Resolver && powershell -NoProfile -ExecutionPolicy Bypass -File test/windows/run-tests.ps1 -Suite ScheduledTask",
+    "test:windows:acl": "node --test test/windows-node-cli-contract.test.mjs",
+    "doctor": "node src/cli.mjs doctor --product workbuddy",
+    "status": "node src/cli.mjs status --product workbuddy",
+    "list": "node src/cli.mjs list --product workbuddy"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Aidhua/workbuddy-skin-studio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Aidhua/workbuddy-skin-studio/issues"
+  },
+  "homepage": "https://github.com/Aidhua/workbuddy-skin-studio#readme"
+}
+
